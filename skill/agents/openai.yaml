@@ -1,0 +1,4 @@
+interface:
+  display_name: "EPUB OpenCC Convert"
+  short_description: "Convert Traditional Chinese EPUB files into Simplified Chinese EPUB files"
+  default_prompt: "Use $epub-opencc-convert to convert this Traditional Chinese EPUB into a Simplified Chinese EPUB and return the new file path."

@@ -4,84 +4,16 @@ import shutil
 import tempfile
 import zipfile
 from pathlib import Path
-from typing import Iterable
 
-from bs4 import BeautifulSoup, NavigableString, Comment
 from fastapi import BackgroundTasks
 from fastapi import FastAPI, File, HTTPException, UploadFile
 from fastapi.responses import FileResponse, HTMLResponse
-from opencc import OpenCC
+from skill.scripts.convert_epub import EpubConversionError, convert_epub
 
 
 EPUB_MEDIA_TYPE = "application/epub+zip"
-TEXT_FILE_SUFFIXES = {".xhtml", ".html", ".htm", ".xml", ".ncx", ".opf"}
-SKIP_TAGS = {"script", "style"}
 
 app = FastAPI(title="EPUB 繁转简服务")
-converter = OpenCC("tw2sp")
-
-
-def _safe_extract_epub(epub_path: Path, output_dir: Path) -> None:
-    with zipfile.ZipFile(epub_path, "r") as archive:
-        for member in archive.infolist():
-            member_path = output_dir / member.filename
-            resolved_path = member_path.resolve()
-            if not str(resolved_path).startswith(str(output_dir.resolve())):
-                raise HTTPException(status_code=400, detail="EPUB 文件包含非法路径。")
-            archive.extract(member, output_dir)
-
-
-def _iter_epub_text_files(root_dir: Path) -> Iterable[Path]:
-    for path in root_dir.rglob("*"):
-        if path.is_file() and path.suffix.lower() in TEXT_FILE_SUFFIXES:
-            yield path
-
-
-def _convert_html_like_file(file_path: Path) -> None:
-    original_text = file_path.read_text(encoding="utf-8")
-    soup = BeautifulSoup(original_text, "lxml-xml")
-
-    if soup.contents and getattr(soup.contents[0], "name", None) is None and not soup.find():
-        return
-
-    for text_node in soup.find_all(string=True):
-        if isinstance(text_node, Comment):
-            continue
-        parent = text_node.parent
-        if parent and parent.name and parent.name.lower() in SKIP_TAGS:
-            continue
-        converted = converter.convert(str(text_node))
-        if converted != text_node:
-            text_node.replace_with(NavigableString(converted))
-
-    file_path.write_text(str(soup), encoding="utf-8")
-
-
-def _repack_epub(source_dir: Path, output_file: Path) -> None:
-    mimetype_path = source_dir / "mimetype"
-    if not mimetype_path.exists():
-        raise HTTPException(status_code=400, detail="EPUB 缺少 mimetype 文件。")
-
-    with zipfile.ZipFile(output_file, "w") as archive:
-        archive.write(mimetype_path, "mimetype", compress_type=zipfile.ZIP_STORED)
-        for path in sorted(source_dir.rglob("*")):
-            if not path.is_file() or path == mimetype_path:
-                continue
-            archive.write(path, path.relative_to(source_dir), compress_type=zipfile.ZIP_DEFLATED)
-
-
-def convert_epub_to_simplified(input_path: Path, output_path: Path) -> None:
-    with tempfile.TemporaryDirectory() as temp_dir:
-        work_dir = Path(temp_dir)
-        extract_dir = work_dir / "extracted"
-        extract_dir.mkdir(parents=True, exist_ok=True)
-
-        _safe_extract_epub(input_path, extract_dir)
-
-        for text_file in _iter_epub_text_files(extract_dir):
-            _convert_html_like_file(text_file)
-
-        _repack_epub(extract_dir, output_path)
 
 
 @app.get("/", response_class=HTMLResponse)
@@ -189,9 +121,10 @@ async def convert(background_tasks: BackgroundTasks, file: UploadFile = File(...
     await file.close()
 
     try:
-        convert_epub_to_simplified(input_path, output_path)
-    except zipfile.BadZipFile as exc:
-        raise HTTPException(status_code=400, detail="上传的文件不是有效的 EPUB。") from exc
+        convert_epub(input_path, output_path)
+    except EpubConversionError as exc:
+        detail = "上传的文件不是有效的 EPUB。" if "有效的 EPUB" in str(exc) else str(exc)
+        raise HTTPException(status_code=400, detail=detail) from exc
 
     background_tasks.add_task(shutil.rmtree, temp_dir, ignore_errors=True)
 
